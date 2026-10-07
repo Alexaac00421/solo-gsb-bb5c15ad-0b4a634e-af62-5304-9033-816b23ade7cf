@@ -235,3 +235,38 @@ class AuditSnapshotDiffPage(BaseModel):
     items: list[AuditSnapshotDiffItem] = Field(
         description="三类差异按 measurement_id 升序合并后的稳定分页；完全相同的测量不输出"
     )
+
+
+# ---------------------------------------------------------------------------
+# 校准覆盖时间线（实时一致视图查询，不物化、不冻结）
+# ---------------------------------------------------------------------------
+
+# 区段类型：有效证书 / 已撤销证书 / 无证书
+CoverageSegmentType = Literal["valid", "revoked", "uncovered"]
+
+
+class CoverageSegment(BaseModel):
+    segment_from: datetime = Field(description="区段起点（含），按时间升序拼接覆盖整个查询窗")
+    segment_to: datetime = Field(description="区段终点（不含）；与下一区段起点相接，不产生空隙")
+    segment_type: CoverageSegmentType = Field(
+        description="valid=有效证书；revoked=已撤销证书；uncovered=无证书"
+    )
+    certificate_no: str | None = Field(
+        default=None,
+        description="证书编号：valid / revoked 区段给出所属证书；uncovered 为 null",
+    )
+    measurement_count: int = Field(
+        description="该区段内当前归属该证书的测量数（每条测量只按最新更正版本计数，"
+        "单条与批次写入均计入）；uncovered 区段恒为 0"
+    )
+
+
+class CoverageTimelineOut(BaseModel):
+    device_id: str
+    window_from: datetime = Field(description="查询窗起点（含，左闭右开）")
+    window_to: datetime = Field(description="查询窗终点（不含）")
+    segment_count: int = Field(description="区段总数（相邻证书即使状态相同也分开）")
+    segments: list[CoverageSegment] = Field(
+        description="按时间升序、连续完整覆盖查询窗 [window_from, window_to) 的区段序列；"
+        "设备无任何证书时为单个 uncovered 区段且计数为 0"
+    )

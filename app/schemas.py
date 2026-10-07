@@ -197,6 +197,38 @@ class AuditSnapshotPage(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# 校准覆盖时间线（实时查询，不物化）
+# ---------------------------------------------------------------------------
+
+# 区段状态：有效证书 / 已撤销证书 / 无证书
+CoverageSegmentStatus = Literal["active", "revoked", "none"]
+
+
+class CoverageSegment(BaseModel):
+    segment_from: datetime = Field(description="区段起点（含）")
+    segment_to: datetime = Field(description="区段终点（不含）")
+    status: CoverageSegmentStatus = Field(
+        description="active=有效证书；revoked=已撤销证书；none=无证书"
+    )
+    certificate_no: str | None = Field(description="证书编号；无证书区段为 null")
+    certificate_id: int | None = Field(description="证书标识；无证书区段为 null")
+    measurement_count: int = Field(
+        description="该区段内当前归属该证书的测量数（按每条测量的最新更正版本计，"
+        "单条与批次写入均计入）；无证书区段为 0"
+    )
+
+
+class CoverageTimelineOut(BaseModel):
+    device_id: str
+    window_from: datetime = Field(description="查询窗起点（含，左闭右开）")
+    window_to: datetime = Field(description="查询窗终点（不含，左闭右开）")
+    segments: list[CoverageSegment] = Field(
+        description="按时间升序、首尾相接完整覆盖查询窗的连续区段；"
+        "相邻证书即使状态相同也各自成段"
+    )
+
+
+# ---------------------------------------------------------------------------
 # 两份冻结审计快照的差异比较
 # ---------------------------------------------------------------------------
 

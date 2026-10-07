@@ -6,7 +6,7 @@ from fastapi import FastAPI
 
 from . import db
 from .errors import ApiError, api_error_handler
-from .routers import audit_snapshots, certificates, measurement_batches, measurements
+from .routers import audit_snapshots, certificates, coverage_timeline, measurement_batches, measurements
 
 
 @asynccontextmanager
@@ -36,6 +36,11 @@ app.include_router(
     audit_snapshots.router,
     prefix="/api/v1/audit-snapshots",
     tags=["audit-snapshots"],
+)
+app.include_router(
+    coverage_timeline.router,
+    prefix="/api/v1/coverage-timeline",
+    tags=["coverage-timeline"],
 )
 
 

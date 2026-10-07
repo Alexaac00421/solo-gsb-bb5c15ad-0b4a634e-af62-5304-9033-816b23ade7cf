@@ -11,6 +11,7 @@
 - **测量批次写入**：一次提交批次键与有序记录，逐条沿用单条写入校验、**整批原子**（任一不合格返回其序号与原因且整批不落库）；批次键支持**幂等重放**——相同键 + 相同有序内容（时刻按 UTC 比较）即使证书后来撤销也返回首次结果，同键不同内容返回 409，并发同键至多生成一批
 - **合规审计快照**：按设备编号与带时区的左闭右开时间窗生成不可变快照，返回快照标识与有效/无效总数；版本链与证书撤销状态取自**同一一致视图**（并发更正/撤销只能整体位于快照前或后），生成后明细与计数**永久冻结**；凭标识按测量编号**稳定分页**读取固定字段明细
 - **快照差异比较**：凭两份快照标识复核两次审计——只接受**同一设备、同一绝对时间窗**的一对快照（不符拒绝并说明原因，未知标识返回未找到）；按测量编号对照两份冻结明细，区分**进入 / 离开 / 变化**并给出三类数量，差异按测量编号升序**稳定分页**；比较只读取冻结明细，后续更正、撤销或写入**不改变**同一对快照的比较结果
+- **校准覆盖时间线**：按设备编号与带时区的左闭右开时间窗查询证书覆盖——结果按时间升序以**连续区段完整覆盖**查询窗（**有效证书 / 已撤销证书 / 无证书**，端点相接无空隙，相邻证书即使状态相同也各自成段，证书跨窗只取交集）；证书区段给出证书编号及区段内**当前归属该证书的测量数**（只按每条测量的**最新更正版本**计，单条与批次写入均计入）；无证书设备返回一个计数为零的无证书区段；区段、最新版本与撤销状态取自**同一一致视图**，后续更正或撤销只改变再次查询的结果，已生成的审计快照仍保持冻结
 
 ## 一键启动
 
@@ -98,6 +99,7 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 | `GET` | `/api/v1/audit-snapshots/{snapshot_id}` | 快照摘要：时间窗、有效/无效总数 |
 | `GET` | `/api/v1/audit-snapshots/{snapshot_id}/items?limit=&offset=` | 按测量编号升序稳定分页读取快照明细 |
 | `GET` | `/api/v1/audit-snapshots/compare?baseline_snapshot_id=&target_snapshot_id=&limit=&offset=` | 比较两份冻结快照，按测量编号返回进入/离开/变化差异 |
+| `GET` | `/api/v1/coverage-timeline?device_id=&window_from=&window_to=` | 校准覆盖时间线：连续区段完整覆盖查询窗（有效/已撤销/无证书），证书区段含当前归属测量数 |
 
 写入请求体：
 
@@ -303,7 +305,7 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 | 404 | `SNAPSHOT_NOT_FOUND` | 摘要或翻页接口使用了未知快照标识 |
 | 422 | （分页校验错误） | `limit` 不在 1–1000、`offset` 为负 |
 
-### 两份审计快照的差异比较（本轮新增）
+### 两份审计快照的差异比较
 
 实验室复核**两次**合规审计快照时，调用方提交基准（`baseline_snapshot_id`，较早一次）与目标
 （`target_snapshot_id`，较晚一次）两个标识，服务按测量编号对照两份**冻结明细**，辨明哪些测量进入、
@@ -445,6 +447,80 @@ curl 'http://localhost:8000/api/v1/audit-snapshots/be648a66a1594717bd492d512f112
 curl 'http://localhost:8000/api/v1/audit-snapshots/be648a66a1594717bd492d512f1120c8/items?limit=50&offset=50'
 ```
 
+### 校准覆盖时间线（本轮新增）
+
+实验室按**设备编号**与**带时区的起止时刻**查询校准覆盖时间线。时间窗为**左闭右开**
+`[window_from, window_to)`，起点必须早于终点。只读接口，通过 HTTP `GET` 完成
+（查询参数含 `+08:00` 等时区写法时注意 URL 编码，示例用 `-G --data-urlencode`）：
+
+```
+GET /api/v1/coverage-timeline?device_id=EQ-001
+                               &window_from=2026-01-01T00:00:00+08:00
+                               &window_to=2027-01-01T00:00:00+08:00
+```
+
+行为语义：
+
+- **连续区段完整覆盖**：结果按时间升序以连续区段完整覆盖查询窗，**端点相接不产生空隙**；
+  与窗相交的证书**只取交集** `[max(valid_from, window_from), min(valid_to, window_to))`，
+  证书之间及窗内首末的空隙以**无证书**区段补齐；**相邻证书即使状态相同也各自成段**。
+- **区段状态**：`active`（有效证书）/ `revoked`（已撤销证书）/ `none`（无证书）。
+  证书区段给出证书编号（及证书标识）与该区段内**当前归属该证书的测量数**；
+  无证书区段的证书字段为 `null`、计数为 0。
+- **测量计数**：只按每条测量的**最新更正版本**计数（无更正时为原始登记 version 1），
+  **单条写入与批次写入均计入**；更正改变归属或时刻后，再次查询的区段计数随之变化。
+- **无证书设备**：设备没有任何证书（含设备从未出现）时返回**一个覆盖全窗的无证书区段**，计数为零。
+- **同一一致视图**：区段（证书有效期与撤销状态）与最新版本归属统计在同一
+  `REPEATABLE READ` 事务内读取——并发的更正、撤销或新登记只能**整体**位于该一致视图
+  之前或之后，不会出现"计数按更正后、撤销状态按更正前"之类的撕裂视图。
+- **实时计算、不物化**：后续更正或撤销只改变**再次查询**的结果；已生成的合规审计快照
+  仍保持冻结，不受本接口影响。
+- 响应内所有时刻（窗口与区段端点）统一按 UTC 输出。
+
+响应示例（窗内依次：无证书空隙 → 有效证书 → 已撤销证书 → 无证书空隙 → 有效证书跨窗截断）：
+
+```json
+{
+  "device_id": "EQ-001",
+  "window_from": "2025-11-30T16:00:00Z",
+  "window_to": "2027-07-31T16:00:00Z",
+  "segments": [
+    {"segment_from": "2025-11-30T16:00:00Z", "segment_to": "2025-12-31T16:00:00Z",
+     "status": "none", "certificate_no": null, "certificate_id": null, "measurement_count": 0},
+    {"segment_from": "2025-12-31T16:00:00Z", "segment_to": "2026-06-30T16:00:00Z",
+     "status": "active", "certificate_no": "CERT-2026-A", "certificate_id": 1, "measurement_count": 2},
+    {"segment_from": "2026-06-30T16:00:00Z", "segment_to": "2026-12-31T16:00:00Z",
+     "status": "revoked", "certificate_no": "CERT-2026-B", "certificate_id": 2, "measurement_count": 2},
+    {"segment_from": "2026-12-31T16:00:00Z", "segment_to": "2027-05-31T16:00:00Z",
+     "status": "none", "certificate_no": null, "certificate_id": null, "measurement_count": 0},
+    {"segment_from": "2027-05-31T16:00:00Z", "segment_to": "2027-07-31T16:00:00Z",
+     "status": "active", "certificate_no": "CERT-2027-C", "certificate_id": 3, "measurement_count": 1}
+  ]
+}
+```
+
+典型错误：
+
+| 状态码 | code | 场景 |
+|---|---|---|
+| 422 | （请求校验错误） | 时刻缺时区、缺少任一查询参数、`device_id` 为空 |
+| 422 | `INVALID_TIME_WINDOW` | `window_from >= window_to`（起点不早于终点），错误信息给出实际窗口 |
+
+最小示例：
+
+```bash
+# 查询设备 EQ-001 在 2026 年的校准覆盖时间线（左闭右开）
+curl -sS -G 'http://localhost:8000/api/v1/coverage-timeline' \
+  --data-urlencode 'device_id=EQ-001' \
+  --data-urlencode 'window_from=2026-01-01T00:00:00+08:00' \
+  --data-urlencode 'window_to=2027-01-01T00:00:00+08:00'
+
+# 起点不早于终点 -> 422
+# {"error":{"code":"INVALID_TIME_WINDOW",
+#           "message":"window_from must be earlier than window_to: [2027-01-01T00:00:00+08:00, 2026-01-01T00:00:00+08:00)"}}
+# 时刻缺时区 -> 422（请求校验错误，指明缺少时区信息）
+```
+
 ## 调用示例
 
 完整端到端示例（登记 → 幂等重试 → 冲突 → 测量 → 撤销 → 有效性查询 → 更正 → 版本冲突/并发 → 历史查询）：
@@ -469,6 +545,12 @@ curl 'http://localhost:8000/api/v1/audit-snapshots/be648a66a1594717bd492d512f112
 
 ```bash
 ./examples/snapshot_compare_demo.sh
+```
+
+校准覆盖时间线端到端示例（首尾相接/带空隙的证书 → 单条与批次写入 → 连续区段完整覆盖查询窗 → 更正后计数随最新版本迁移 → 撤销后区段变为已撤销且审计快照保持冻结 → 端点相接窗口/空隙窗口/无证书设备 → 缺时区与起点不早于终点拒绝）：
+
+```bash
+./examples/coverage_timeline_demo.sh
 ```
 
 最小示例：
@@ -557,12 +639,14 @@ curl -X POST http://localhost:8000/api/v1/measurement-batches \
 │       ├── certificates.py
 │       ├── measurements.py
 │       ├── measurement_batches.py
-│       └── audit_snapshots.py # 合规审计快照生成 / 摘要 / 稳定分页 / 两份快照差异比较
+│       ├── audit_snapshots.py # 合规审计快照生成 / 摘要 / 稳定分页 / 两份快照差异比较
+│       └── coverage_timeline.py # 校准覆盖时间线（连续区段实时查询，同一一致视图）
 ├── db/init.sql            # 建表、约束、不可变触发器（容器首次启动自动执行）
 ├── examples/demo.sh       # 端到端调用示例
 ├── examples/batch_demo.sh # 测量批次端到端调用示例
 ├── examples/snapshot_demo.sh # 审计快照端到端调用示例
 ├── examples/snapshot_compare_demo.sh # 两份快照差异比较端到端调用示例
+├── examples/coverage_timeline_demo.sh # 校准覆盖时间线端到端调用示例
 ├── Dockerfile
 ├── docker-compose.yml
 └── requirements.txt
